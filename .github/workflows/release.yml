@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version type to bump (patch, minor, major)'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0  # Ensure the full history is fetched to push changes back
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '19'
+      
+      - name: Install dependencies and build
+        run: |
+          yarn install --frozen-lockfile
+          yarn build
+
+      - name: Configure Git and create release branch for version update
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b ci-version-update
+          git push origin ci-version-update
+      
+      - name: Configure NPM registry
+        run: npm config set registry 'https://registry.npmjs.org/'
+
+      - name: Authenticate with NPM
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
+      - name: Lerna version
+        id: version
+        run: |
+          node_modules/.bin/lerna version ${{ github.event.inputs.version_type }} --yes --no-push --no-git-tag-version
+          git add .
+          git commit -m "ci(release): update packages.json and changelog [ci skip]"
+          git push origin ci-version-update
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to NPM
+        if: steps.version.conclusion == 'success'
+        id: release
+        run: node_modules/.bin/lerna publish from-package --yes
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Push the version change
+        if: steps.release.conclusion == 'success'
+        uses: CasperWA/push-protected@v2
+        with:
+          token: ${{ secrets.PAT }}
+          branch: ${{ github.ref_name }}
+
+      - name: Delete the intermediate branch
+        if: steps.release.conclusion == 'success'
+        run: |
+           git branch -D ci-version-update &>/dev/null || true
+           git push origin :ci-version-update &>/dev/null || true
